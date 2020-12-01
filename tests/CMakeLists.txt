@@ -21,7 +21,7 @@ if (DO_AUTO_TEST)
     else()
         add_custom_command(TARGET all_tests
             COMMENT "Run tests"
-            POST_BUILD COMMAND ${PYTHON_EXECUTABLE} -c \"import sys $<SEMICOLON>  sys.path.insert(0, '${CMAKE_LIBRARY_OUTPUT_DIRECTORY}') $<SEMICOLON>  import unittest $<SEMICOLON>  result=unittest.TextTestRunner().run(unittest.defaultTestLoader.discover('${CMAKE_CURRENT_BINARY_DIR}')) $<SEMICOLON>  exit(0 if result.wasSuccessful() else 1)\"
+            POST_BUILD COMMAND ${PYTHON_EXECUTABLE} -c \"import sys $<SEMICOLON>  sys.path.insert(0, '${CMAKE_BINARY_DIR}/src') $<SEMICOLON>  import unittest $<SEMICOLON>  result=unittest.TextTestRunner() .run(unittest.defaultTestLoader.discover('${CMAKE_CURRENT_BINARY_DIR}')) $<SEMICOLON>  exit(0 if result.wasSuccessful() else 1) \"
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
                 )
     endif()
