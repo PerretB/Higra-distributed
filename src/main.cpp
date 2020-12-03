@@ -229,6 +229,147 @@ namespace hg {
                     hg::tree(xt::view(new_parents, xt::range(0, num_nodes))),
                     xt::eval(xt::view(new_node_map, xt::range(0, num_nodes))));
         }
+
+        template<typename T, typename T2>
+        auto
+        insert(const hg::tree &tree1, const xt::xexpression<T> &xnode_map1, const xt::xexpression<T2> &xmst_weights1,
+               const hg::tree &tree2, const xt::xexpression<T> &xnode_map2, const xt::xexpression<T2> &xmst_weights2,
+               const xt::xexpression<T> &xtree1_2_tree2_leaves_map) {
+            auto &node_map1 = xnode_map1.derived_cast();
+            auto &mst_weights1 = xmst_weights1.derived_cast();
+            auto &node_map2 = xnode_map2.derived_cast();
+            auto &mst_weights2 = xmst_weights2.derived_cast();
+            auto &tree1_2_tree2_leaves_map = xtree1_2_tree2_leaves_map.derived_cast();
+            hg_assert_1d_array(node_map1);
+            hg_assert_1d_array(node_map2);
+            hg_assert_1d_array(mst_weights1);
+            hg_assert_1d_array(mst_weights2);
+            hg_assert_1d_array(tree1_2_tree2_leaves_map);
+            hg_assert_integral_value_type(node_map1);
+            hg_assert_node_weights(tree1, node_map1);
+            hg_assert_node_weights(tree2, node_map2);
+            hg_assert(mst_weights1.size() == num_vertices(tree1) - num_leaves(tree1),
+                      "mst altitudes 1 size does not match with the size of tree1.");
+            hg_assert(mst_weights2.size() == num_vertices(tree2) - num_leaves(tree2),
+                      "mst altitudes 2 size does not match with the size of tree2.");
+            hg_assert(tree1_2_tree2_leaves_map.size() == num_leaves(tree1),
+                      "mapping size between tree1 leaves and tree 2 does not match with the number of leaves in tree1.");
+
+            using value_type = typename T2::value_type;
+            using pair = std::pair<value_type, index_t>;
+            pair infinity = pair((std::numeric_limits<value_type>::has_infinity) ?
+                                 std::numeric_limits<value_type>::infinity() :
+                                 std::numeric_limits<value_type>::max(),
+                                 std::numeric_limits<index_t>::max());
+
+            const auto less = [](const pair &p1, const pair &p2) {
+                return (p1.first < p2.first) ||
+                       ((p1.first == p2.first) && (p1.second < p2.second));
+            };
+
+            const index_t size_tree1 = num_vertices(tree1);
+            const index_t size_tree2 = num_vertices(tree2);
+            const index_t num_leaves_tree1 = num_leaves(tree1);
+            const index_t num_leaves_tree2 = num_leaves(tree2);
+
+            // will hold the index of each node in the merged tree
+            array_1d<index_t> new_rank_tree1 = xt::zeros<index_t>({size_tree1});
+            array_1d<index_t> new_rank_tree2 = xt::zeros<index_t>({size_tree2});
+
+            // for each node of the merged tree, gives the corresding nodes from tree1 and tree2 (-1) if no such node exists
+            array_2d<index_t> merge_tree_node_map = xt::empty<index_t>({(size_t)(size_tree1 + size_tree2), (size_t)2});
+
+            //
+            //  Leaf processing
+            //
+            xt::view(merge_tree_node_map, xt::range(0, num_leaves_tree2), 0) = -1;
+            for (index_t i = 0; i < num_leaves_tree1; ++i) {
+                merge_tree_node_map(tree1_2_tree2_leaves_map(i), 0) = i;
+            }
+
+            for (index_t i = 0; i < num_leaves_tree2; ++i) {
+                merge_tree_node_map(i, 1) = i;
+                if (merge_tree_node_map(i, 0) == -1) {
+                    // mark the parent of i as alive (cannot be a deleted root)
+                    new_rank_tree2(parent(i, tree2)) = -1;
+                }
+            }
+
+            //
+            //  Main Loop
+            //
+
+            index_t index_tree1 = num_leaves_tree1;
+            index_t index_tree2 = num_leaves_tree2;
+            index_t current_rank = num_leaves_tree2;
+
+            while (index_tree1 < size_tree1 || index_tree2 < size_tree2) {
+                // followings nodes in tree1 and tree2 represent the same region: merge
+                if (index_tree1 < size_tree1 && index_tree2 < size_tree2 &&
+                    node_map1(index_tree1) == node_map2(index_tree2)) {
+                    new_rank_tree1(index_tree1) = current_rank;
+                    new_rank_tree2(index_tree2) = current_rank;
+                    merge_tree_node_map(current_rank, 0) = index_tree1;
+                    merge_tree_node_map(current_rank, 1) = index_tree2;
+                    ++index_tree1;
+                    ++index_tree2;
+                    ++current_rank;
+                } else {
+                    pair iw_tree1 = (index_tree1 < size_tree1) ?
+                                    pair(mst_weights1(index_tree1 - num_leaves_tree1), node_map1(index_tree1)) :
+                                    infinity;
+                    pair iw_tree2 = (index_tree2 < size_tree2) ?
+                                    pair(mst_weights2(index_tree2 - num_leaves_tree2), node_map2(index_tree2)) :
+                                    infinity;
+                    if (less(iw_tree2, iw_tree1)) { // check condition
+                        if (new_rank_tree2(index_tree2) != -1) {
+                            new_rank_tree2(parent(index_tree2, tree2)) = -1;
+                            new_rank_tree2(index_tree2) = current_rank;
+                            merge_tree_node_map(current_rank, 0) = -1;
+                            merge_tree_node_map(current_rank, 1) = index_tree2;
+                            ++current_rank;
+                        }
+                        ++index_tree2;
+                    } else {
+                        new_rank_tree1(index_tree1) = current_rank;
+                        merge_tree_node_map(current_rank, 0) = index_tree1;
+                        merge_tree_node_map(current_rank, 1) = -1;
+                        ++index_tree1;
+                        ++current_rank;
+                    }
+
+                }
+            }
+
+            //
+            // Merged tree creation
+            //
+            index_t num_nodes = current_rank;
+            array_1d<index_t> new_parent = xt::empty<index_t>({num_nodes});
+            array_1d<index_t> new_node_map = xt::empty<index_t>({num_nodes});
+
+            for (index_t i = 0; i < num_nodes; ++i) {
+                auto nt1 = merge_tree_node_map(i, 0);
+                auto nt2 = merge_tree_node_map(i, 1);
+                if (nt1 != -1) {
+                    if (nt1 == root(tree1)) {
+                        new_parent(i) = i;
+                    } else {
+                        new_parent(i) = new_rank_tree1(parent(nt1, tree1));
+                    }
+                    new_node_map(i) = node_map1(nt1);
+                } else {
+                    if (nt2 == root(tree2)) {
+                        new_parent(i) = i;
+                    } else {
+                        new_parent(i) = new_rank_tree2(parent(nt2, tree2));
+                    }
+                    new_node_map(i) = node_map2(nt2);
+                }
+            }
+
+            return std::make_pair(hg::tree(std::move(new_parent)), std::move(new_node_map));
+        }
     }
 }
 
@@ -265,5 +406,16 @@ PYBIND11_MODULE(higra_distributed, m) {
                                                border_edge_map, border_edge_weights);
               return py::make_tuple(std::move(res.first), std::move(res.second));
           }, "Join two trees by their border edges.");
+
+    m.def("insert",
+          [](const hg::tree &tree1, const xt::pyarray<hg::index_t> &node_map1, const xt::pyarray<double> &mst_weights1,
+             const hg::tree &tree2, const xt::pyarray<hg::index_t> &node_map2, const xt::pyarray<double> &mst_weights2,
+             const xt::pyarray<hg::index_t> &tree1_2_tree2_leaves_map) {
+
+              auto res = hg::distributed::insert(tree1, node_map1, mst_weights1,
+                                                 tree2, node_map2, mst_weights2,
+                                                 tree1_2_tree2_leaves_map);
+              return py::make_tuple(std::move(res.first), std::move(res.second));
+          }, "Insert tree1 into tree2.");
 
 }
