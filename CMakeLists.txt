@@ -109,7 +109,7 @@ find_package(PythonInterp 3 REQUIRED)
 find_package(pybind11 REQUIRED)
 find_package(NumPy REQUIRED)
 
-add_subdirectory(src)
+add_subdirectory(higra_distributed)
 
 configure_file(setup.py ${CMAKE_CURRENT_BINARY_DIR}/setup.py)
 configure_file(README.md ${CMAKE_CURRENT_BINARY_DIR}/README.md COPYONLY)

@@ -378,14 +378,14 @@ using namespace hg;
 
 
 // Python Module and Docstrings
-PYBIND11_MODULE(higra_distributed, m) {
+PYBIND11_MODULE(higra_distributedm, m) {
     xt::import_numpy();
 
     m.doc() = R"pbdoc(
         An example higra extension
     )pbdoc";
 
-    m.def("select", [](const hg::tree &tree, const xt::pyarray<hg::index_t> &selected_leaves) {
+    m.def("_select", [](const hg::tree &tree, const xt::pyarray<hg::index_t> &selected_leaves) {
               hg_assert(xt::amin(selected_leaves)() >= 0 && xt::amax(selected_leaves)() < (index_t) num_leaves(tree),
                         "Invalid leaf index.");
               auto res = hg::distributed::select(tree, selected_leaves);
@@ -394,7 +394,7 @@ PYBIND11_MODULE(higra_distributed, m) {
           py::arg("tree"),
           py::arg("selected_leaves"));
 
-    m.def("join",
+    m.def("_join",
           [](const hg::tree &tree1, const xt::pyarray<hg::index_t> &node_map1, const xt::pyarray<double> &mst_weights1,
              const hg::tree &tree2, const xt::pyarray<hg::index_t> &node_map2, const xt::pyarray<double> &mst_weights2,
              const xt::pyarray<hg::index_t> &border_edge_sources, const xt::pyarray<hg::index_t> &border_edge_targets,
@@ -407,7 +407,7 @@ PYBIND11_MODULE(higra_distributed, m) {
               return py::make_tuple(std::move(res.first), std::move(res.second));
           }, "Join two trees by their border edges.");
 
-    m.def("insert",
+    m.def("_insert",
           [](const hg::tree &tree1, const xt::pyarray<hg::index_t> &node_map1, const xt::pyarray<double> &mst_weights1,
              const hg::tree &tree2, const xt::pyarray<hg::index_t> &node_map2, const xt::pyarray<double> &mst_weights2,
              const xt::pyarray<hg::index_t> &tree1_2_tree2_leaves_map) {

@@ -6,13 +6,13 @@ foreach (FILE ${TEST_FILES})
 endforeach ()
         
 add_custom_target(all_tests ALL
-        DEPENDS higra_distributed
+        DEPENDS higra_distributedm
         )
 
         
 if (DO_AUTO_TEST)
     if (WIN32)
-        set (PYTHON_TEST_COMMAND "import sys;  sys.path.insert(0, '${CMAKE_LIBRARY_OUTPUT_DIRECTORY}');  import unittest;  result=unittest.TextTestRunner().run(unittest.defaultTestLoader.discover('${CMAKE_CURRENT_BINARY_DIR}'));  exit(0 if result.wasSuccessful() else 1)")
+        set (PYTHON_TEST_COMMAND "import sys;  sys.path.insert(0, '${CMAKE_BINARY_DIR}');  import unittest;  result=unittest.TextTestRunner().run(unittest.defaultTestLoader.discover('${CMAKE_CURRENT_BINARY_DIR}'));  exit(0 if result.wasSuccessful() else 1)")
         add_custom_command(TARGET all_tests
             COMMENT "Run tests"
             POST_BUILD COMMAND ${PYTHON_EXECUTABLE} -c \"${PYTHON_TEST_COMMAND}\"
@@ -21,7 +21,7 @@ if (DO_AUTO_TEST)
     else()
         add_custom_command(TARGET all_tests
             COMMENT "Run tests"
-            POST_BUILD COMMAND ${PYTHON_EXECUTABLE} -c \"import sys $<SEMICOLON>  sys.path.insert(0, '${CMAKE_BINARY_DIR}/src') $<SEMICOLON>  import unittest $<SEMICOLON>  result=unittest.TextTestRunner() .run(unittest.defaultTestLoader.discover('${CMAKE_CURRENT_BINARY_DIR}')) $<SEMICOLON>  exit(0 if result.wasSuccessful() else 1) \"
+            POST_BUILD COMMAND ${PYTHON_EXECUTABLE} -c \"import sys $<SEMICOLON>  sys.path.insert(0, '${CMAKE_BINARY_DIR}') $<SEMICOLON>  import unittest $<SEMICOLON>  result=unittest.TextTestRunner() .run(unittest.defaultTestLoader.discover('${CMAKE_CURRENT_BINARY_DIR}')) $<SEMICOLON>  exit(0 if result.wasSuccessful() else 1) \"
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
                 )
     endif()
