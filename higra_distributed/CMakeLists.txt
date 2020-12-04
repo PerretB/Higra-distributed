@@ -13,7 +13,8 @@ set(PY_FILES
 REGISTER_PYTHON_MODULE_FILES("${PY_FILES}")
 
 set(PYMODULE_COMPONENTS
-        main.cpp)
+        pydistributed.cpp
+        module.cpp)
 
 pybind11_add_module(higra_distributedm ${PYMODULE_COMPONENTS})
 
