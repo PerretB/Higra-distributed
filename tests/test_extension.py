@@ -111,7 +111,7 @@ class ExampleTest(unittest.TestCase):
         self.assertTrue(np.all(mst_weights == ref_mst_weights))
 
     def test_distributed_bpt(self):
-        size = 50
+        size = 100
         slice_size = 13
         np.random.seed(42)
         image = np.random.randint(0, 256, (size, size))
@@ -123,7 +123,7 @@ class ExampleTest(unittest.TestCase):
         ref_tree = m.partial_bpt(causal_graph_trivial, 0)
 
         for i in range(causal_graph.num_slices):
-            ref_tree_i = m.select(ref_tree, causal_graph.get_node_map(i))
+            ref_tree_i = m.select(ref_tree, causal_graph.get_vertex_map(i))
 
             self.assertTrue(np.all(ref_tree_i.parents() == distributed_hierarchy[i].parents()))
             self.assertTrue(np.all(ref_tree_i.node_map == distributed_hierarchy[i].node_map))

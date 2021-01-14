@@ -1,10 +1,10 @@
+#include "pydistributed.hpp"
+
 #include "pybind11/pybind11.h"
 #include "higra/graph.hpp"
 #include "higra/sorting.hpp"
 #include "higra/structure/unionfind.hpp"
 #include "higra/accumulator/tree_accumulator.hpp"
-
-#define FORCE_IMPORT_ARRAY
 
 #include "xtensor-python/pyarray.hpp"
 #include "xtensor-python/pytensor.hpp"
@@ -42,6 +42,7 @@ namespace hg {
                     ++num_nodes_new_tree;
                 }
             }
+
             // special case for the root
             if (new_node_index(root(tree)) != -1) {
                 new_node_index(root(tree)) = num_nodes_new_tree;
@@ -111,6 +112,7 @@ namespace hg {
                                  std::numeric_limits<value_type>::max(),
                                  std::numeric_limits<index_t>::max());
 
+
             const auto less = [](const pair &p1, const pair &p2) {
                 return (p1.first < p2.first) ||
                        ((p1.first == p2.first) && (p1.second < p2.second));
@@ -121,19 +123,28 @@ namespace hg {
                 xt::noalias(xt::view(attr, xt::range(0, (index_t) num_leaves(tree)), 0)) =
                         xt::arange(shift, shift + (index_t) num_leaves(tree));
 
-                for (auto i: leaves_to_root_iterator(tree, leaves_it::exclude, root_it::include)) {
-                    attr(i, 0) = attr(child(0, i, tree), 0);
-                    if (num_children(i, tree) == 2) {
-                        attr(i, 1) = attr(child(1, i, tree), 0);
+                for (auto i: leaves_to_root_iterator(tree, leaves_it::include, root_it::exclude)) {
+                    index_t p = parent(i, tree);
+                    if (attr(p, 0) == -1){
+                        attr(p, 0) = attr(i, 0);
+                    } else{
+                        attr(p, 1) = attr(i, 0);
                     }
                 }
+
                 return attr;
             };
 
             const auto child_one_leaf_tree1 = attribute_child_one_leaf_node(tree1, 0);
             const auto child_one_leaf_tree2 = attribute_child_one_leaf_node(tree2, num_leaves_tree1);
 
-            const auto sorted_edge_indices = hg::stable_arg_sort(border_edge_weights);
+            array_1d<index_t> sorted_edge_indices = xt::arange<index_t>({(index_t) border_edge_weights.shape(0)});
+            hg::stable_sort(sorted_edge_indices,
+                            [&border_edge_weights, &border_edge_map](const index_t i, const index_t j) {
+                                return (border_edge_weights(i) < border_edge_weights(j)) ||
+                                       ((border_edge_weights(i) == border_edge_weights(j)) &&
+                                        (border_edge_map(i) == border_edge_map(j)));
+                            });
 
             // disjoint forest
             union_find uf(num_leaves_join);
@@ -166,7 +177,7 @@ namespace hg {
 
             // while an edge set is not empty
             while (index_tree1 < size_tree1 || index_tree2 < size_tree2 || index_edge < num_border_edges) {
-                const auto ei = sorted_edge_indices(index_edge);
+                const auto ei = (index_edge < num_border_edges) ? sorted_edge_indices(index_edge) : -1;
                 index_t canonical1 = -1;
                 index_t canonical2 = -1;
                 pair edge;
@@ -190,6 +201,7 @@ namespace hg {
                     canonical1 = uf.find(source);
                     canonical2 = uf.find(target + num_leaves_tree1);
                     edge = iw_edge;
+
                     ++index_edge;
                 } else { // smallest element is a node of a tree
 
@@ -231,11 +243,13 @@ namespace hg {
 
             new_parents(num_nodes - 1) = num_nodes - 1;
 
+            array_1d<index_t> rnew_node_map = xt::view(new_node_map, xt::range(0, num_nodes));
+            array_1d<value_type > rnew_mst_weights = xt::view(new_mst_weights,
+                                                              xt::range(0, num_nodes - (num_leaves_tree1 + num_leaves_tree2)));
             return std::make_tuple(
                     hg::tree(xt::view(new_parents, xt::range(0, num_nodes))),
-                    xt::eval(xt::view(new_node_map, xt::range(0, num_nodes))),
-                    xt::eval(xt::view(new_mst_weights,
-                                      xt::range(0, num_nodes - (num_leaves_tree1 + num_leaves_tree2)))));
+                    rnew_node_map,
+                    rnew_mst_weights);
         }
 
         template<typename T, typename T2>
@@ -279,19 +293,19 @@ namespace hg {
             array_1d<index_t> new_rank_tree1 = xt::zeros<index_t>({size_tree1});
             array_1d<index_t> new_rank_tree2 = xt::zeros<index_t>({size_tree2});
 
-            // for each node of the merged tree, gives the corresding nodes from tree1 and tree2 (-1) if no such node exists
+            // for each node of the merged tree, gives the corresponding nodes from tree1 and tree2 (-1) if no such node exists
             array_2d<index_t> merge_tree_node_map = xt::empty<index_t>(
-                    {(size_t) (size_tree1 + size_tree2), (size_t) 2});
+                    {(size_t) (size_tree1 + size_tree2 - num_leaves_tree1), (size_t) 2});
 
             //
             //  Leaf processing
             //
             for (index_t i = 0, j = 0; i < num_leaves_tree2; ++i) {
                 merge_tree_node_map(i, 1) = i;
-                if(j < num_leaves_tree1 && node_map1(j) == node_map2(i)){
+                if (j < num_leaves_tree1 && node_map1(j) == node_map2(i)) {
                     merge_tree_node_map(i, 0) = j;
                     ++j;
-                }else{
+                } else {
                     merge_tree_node_map(i, 0) = -1;
                     // mark the parent of i as alive (cannot be a deleted root)
                     new_rank_tree2(parent(i, tree2)) = -1;
@@ -324,7 +338,7 @@ namespace hg {
                                     pair(mst_weights2(index_tree2 - num_leaves_tree2), node_map2(index_tree2)) :
                                     infinity;
                     if (less(iw_tree2, iw_tree1)) { // check condition
-                        if (new_rank_tree2(index_tree2) != -1) {
+                        if (new_rank_tree2(index_tree2) == -1) {
                             new_rank_tree2(parent(index_tree2, tree2)) = -1;
                             new_rank_tree2(index_tree2) = current_rank;
                             merge_tree_node_map(current_rank, 0) = -1;
@@ -388,13 +402,8 @@ namespace hg {
 using namespace hg;
 
 
-// Python Module and Docstrings
-PYBIND11_MODULE(higra_distributedm, m) {
-    xt::import_numpy();
-
-    m.doc() = R"pbdoc(
-        An example higra extension
-    )pbdoc";
+void py_init_distributed(pybind11::module &m){
+    //xt::import_numpy();
 
     m.def("_select", [](const hg::tree &tree, const xt::pyarray<hg::index_t> &selected_leaves) {
               hg_assert(xt::amin(selected_leaves)() >= 0 && xt::amax(selected_leaves)() < (index_t) num_leaves(tree),
@@ -433,3 +442,4 @@ PYBIND11_MODULE(higra_distributedm, m) {
           }, "Insert tree1 into tree2.");
 
 }
+
