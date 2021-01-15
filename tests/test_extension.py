@@ -41,29 +41,47 @@ class ExampleTest(unittest.TestCase):
 
         g = hg.get_4_adjacency_graph((2, 6))
         edge_weights = np.asarray((3, 16, 12, 15, 2, 14, 8, 11, 1, 10, 7, 6, 13, 4, 9, 5))
+        tree, altitudes = hg.bpt_canonical(g, edge_weights)
 
-        return hg.bpt_canonical(g, edge_weights)
+        tree_mst_edge_map = tree.mst_edge_map
+        leaf_map = np.arange(g.num_vertices())
+        mst_edge_map = tree_mst_edge_map
+
+        node_map = np.concatenate((leaf_map, mst_edge_map))
+
+        tree.node_map = node_map
+        tree.mst_weights = edge_weights[tree_mst_edge_map]
+
+        return tree
 
     def test_select(self):
-        base_tree, altitudes = ExampleTest.get_test_tree()
+        base_tree = ExampleTest.get_test_tree()
 
-        tree, node_map = m.cpp._select(base_tree, (0, 1, 6, 7))
+        tree, node_map, mst_weights = m.cpp._select(base_tree, base_tree.node_map, base_tree.mst_weights, (0, 1, 6, 7))
         ref_parents = (4, 4, 5, 5, 6, 7, 7, 7)
-        ref_node_map = (0, 1, 6, 7, 14, 17, 21, 22)
+        ref_node_map = (0, 1, 6, 7, 0, 11, 2, 12)
+        ref_mst_weights = (3, 6, 12, 13)
         self.assertTrue(np.all(tree.parents() == ref_parents))
         self.assertTrue(np.all(node_map == ref_node_map))
+        self.assertTrue(np.all(mst_weights == ref_mst_weights))
 
-        tree, node_map = m.cpp._select(base_tree, (2, 3, 8, 9))
+        tree, node_map, mst_weights = m.cpp._select(base_tree, base_tree.node_map, base_tree.mst_weights, (2, 3, 8, 9))
         ref_parents = (4, 4, 5, 5, 6, 7, 7, 8, 9, 9)
-        ref_node_map = (2, 3, 8, 9, 13, 15, 19, 20, 21, 22)
-        self.assertTrue(np.all(tree.parents() == ref_parents))
-        self.assertTrue(np.all(node_map == ref_node_map))
+        ref_node_map = (2, 3, 8, 9, 4, 13, 6, 14, 2, 12)
+        ref_mst_weights = (2, 4, 8, 9, 12, 13)
 
-        tree, node_map = m.cpp._select(base_tree, (10, 5, 11, 4))
-        ref_parents = (4, 4, 5, 5, 6, 6, 7, 8, 9, 10, 10)
-        ref_node_map = (4, 5, 10, 11, 12, 16, 18, 19, 20, 21, 22)
         self.assertTrue(np.all(tree.parents() == ref_parents))
         self.assertTrue(np.all(node_map == ref_node_map))
+        self.assertTrue(np.all(mst_weights == ref_mst_weights))
+
+        tree, node_map, mst_weights = m.cpp._select(base_tree, base_tree.node_map, base_tree.mst_weights,
+                                                    (4, 5, 10, 11))
+        ref_parents = (4, 4, 5, 5, 6, 6, 7, 8, 9, 10, 10)
+        ref_node_map = (4, 5, 10, 11, 8, 15, 10, 6, 14, 2, 12)
+        ref_mst_weights = (1, 5, 7, 8, 9, 12, 13)
+        self.assertTrue(np.all(tree.parents() == ref_parents))
+        self.assertTrue(np.all(node_map == ref_node_map))
+        self.assertTrue(np.all(mst_weights == ref_mst_weights))
 
     def test_join(self):
         tree1 = hg.Tree((2, 3, 4, 4, 5, 6, 6))

@@ -6,7 +6,7 @@ import math
 """
 Vocabulary:
 
-- graph: the complete graph representing the whole image. This graph never has to be in memory at once. 
+- full graph: the complete graph representing the whole image. This graph never has to be in memory at once. 
   We assume that we have a bijection between the vertices (resp. the edges) of the graph and the set of integers 
   |[0, n |[ where n is equal to the number of vertices (resp. edges in the graph). The edges of this graph are weighted.
 
@@ -21,18 +21,22 @@ Vocabulary:
 """
 
 
-def select(tree, selected_leaves):
+def select(tree, selected_vertices):
     """
-    Select a sub distributed tree of the given distributed tree containing the given set of leaf nodes.
+    Select a sub distributed tree of the given distributed tree containing the given set of graph vertices.
+
+    .. attention:
+
+        Selected vertices must be given in a monotonic increasing order
 
     :param tree: a distributed tree (:class:`~higra.Tree`)
-    :param selected_leaves: 1d array containing the indices of the selected leaf nodes (nd array of dtype int64)
+    :param selected_vertices: 1d array containing the indices of the selected graph vertices (nd array of dtype int64)
     :return: a new distributed tree
     """
-    new_tree, new_node_map = cpp._select(tree, selected_leaves)
+    new_tree, new_node_map, new_mst_weights = cpp._select(tree, tree.node_map, tree.mst_weights, selected_vertices)
 
-    new_tree.node_map = tree.node_map[new_node_map]
-    new_tree.mst_weights = tree.mst_weights[new_node_map[new_tree.num_leaves():] - tree.num_leaves()]
+    new_tree.node_map = new_node_map
+    new_tree.mst_weights = new_mst_weights
     return new_tree
 
 
@@ -51,6 +55,11 @@ def join(tree1, tree2, weighted_border):
           border_edge_map[i] is the index of the i-th edge in the full graph
         - a 1d array *border_edge_weights* of dtype float64 of size n, the weight of the edge in the full graph:
           for all i, border_edge_weights[i] is the weight of the i-th edge in the full graph
+
+    .. attention:
+
+        Border edge sources and border edge targets must be given as node indices relative to respectively tree1 and tree2
+        (they are not vertex indices in the full graph but leaf node indices in their respective tree).
 
     :param tree1: first distributed tree (:class:`~higra.Tree`)
     :param tree2: second distributed tree (:class:`~higra.Tree`)
@@ -104,8 +113,7 @@ class causal_4adj_graph:
 
     def _get_slice_interval(self, slice_number):
         """
-        Assume that the slice :attr:`slice_number` spans from the line *start* (included) to the line *stop* (excluded),
-        then this function returns the pair *(start, stop)*.
+        Return the first (included) and last (excluded) line number of the given slice.
 
         For all the slices, except perhaps the last one, we have *stop - start* equals to *self.max_slice_size*
 
@@ -177,17 +185,25 @@ class causal_4adj_graph:
 
     def get_slice_back_frontier(self, slice_number):
         """
-        Get the vertex index of the given slice that are on the frontier
+        Get the indices of the vertices of the given slice that are on the frontier with the previous slice (ie,
+        vertices v such that there exists an edge (v,w) in the full graph where w is a vertex of the slice slice_number - 1
 
         :param slice_number:
         :return:
         """
-        assert 0 < slice_number < self.num_slices, "Invalid slice number"
-        return np.arange(self.width)
+        start, _ = self._get_slice_interval(slice_number)
+        return np.arange(start * self.width, (start + 1) * self.width)
 
     def get_slice_front_frontier(self, slice_number):
-        assert 0 <= slice_number < self.num_slices - 1, "Invalid slice number"
-        return np.arange(self.width * (self.max_slice_size - 1), self.width * self.max_slice_size)
+        """
+        Get the indices of the vertices of the given slice that are on the frontier with the next slice (ie,
+        vertices v such that there exists an edge (v,w) in the full graph where w is a vertex of the slice slice_number + 1
+
+        :param slice_number:
+        :return:
+        """
+        _, stop = self._get_slice_interval(slice_number)
+        return np.arange((stop - 1) * self.width, stop * self.width)
 
     def get_weighted_border_edges(self, slice_number):
         assert 0 <= slice_number < self.num_slices - 1, "Invalid slice number"
@@ -200,14 +216,6 @@ class causal_4adj_graph:
         edge_weights = self.weight_function(im[0, :].ravel(), im[1, :].ravel())
 
         return edge_sources, edge_targets, edge_map, edge_weights
-
-    def get_border_back(self, slice_number):
-        assert 0 <= slice_number < self.num_slices - 1, "Invalid slice number"
-        return np.arange(self.width)
-
-    def get_border_front(self, slice_number):
-        assert 0 <= slice_number < self.num_slices - 1, "Invalid slice number"
-        return np.arange(self.width, 2 * self.width)
 
 
 def partial_bpt(causal_graph, slice_number):
@@ -228,22 +236,24 @@ def distributed_canonical_bpt(causal_graph):
     m_up = [None]
     m_down = [None] * causal_graph.num_slices
     b_down = [None] * causal_graph.num_slices
+
     for i in range(causal_graph.num_slices - 1):
         bpt_ip1 = partial_bpt(causal_graph, i + 1)
 
-        b_i_border_tree = select(b_up[i], causal_graph.get_slice_front_frontier(i))
-        b_ip1_border_tree = select(bpt_ip1, causal_graph.get_slice_back_frontier(i + 1))
+        front_slice_i = causal_graph.get_slice_front_frontier(i)
+        back_slice_ip1 = causal_graph.get_slice_back_frontier(i + 1)
+        b_i_border_tree = select(b_up[i], front_slice_i)
+        b_ip1_border_tree = select(bpt_ip1, back_slice_ip1)
         m_up_ip1 = join(b_i_border_tree, b_ip1_border_tree, causal_graph.get_weighted_border_edges(i))
 
-        b_up_ip1 = insert(select(m_up_ip1, causal_graph.get_border_front(i)), bpt_ip1)
+        b_up_ip1 = insert(select(m_up_ip1, back_slice_ip1), bpt_ip1)
         m_up.append(m_up_ip1)
         b_up.append(b_up_ip1)
 
     m_down[-1] = m_up[-1]
     b_down[-1] = b_up[-1]
-
     for i in range(causal_graph.num_slices - 2, -1, -1):
-        b_down[i] = insert(select(m_down[i + 1], causal_graph.get_border_back(i)), b_up[i])
+        b_down[i] = insert(select(m_down[i + 1], causal_graph.get_slice_front_frontier(i)), b_up[i])
         if i > 0:
             m_down[i] = insert(select(b_down[i], causal_graph.get_slice_back_frontier(i)), m_up[i])
 
