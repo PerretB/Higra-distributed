@@ -11,17 +11,98 @@
 #include "xtensor/xindex_view.hpp"
 #include "xtensor/xview.hpp"
 #include "xtensor/xnoalias.hpp"
+#include "xtensor/xio.hpp"
 
 namespace py = pybind11;
 
 
 namespace hg {
     namespace distributed {
-        template<typename T>
-        auto select(const hg::tree &tree, const xt::xexpression<T> &xselected_leaves) {
-            auto &selected_leaves = xselected_leaves.derived_cast();
-            hg_assert_1d_array(selected_leaves);
-            hg_assert_integral_value_type(selected_leaves);
+
+        namespace distributed_internal {
+
+            /**
+             * Assume that subset and ref both contain indices such that:
+             *  - any two elements in subset are different
+             *  - any two elements in ref are different
+             *  - every element in subset is contained in ref
+             * This functions finds where the elements of subset are located in ref.
+             *
+             * Formally, this function finds the map m such that for any in 0 ... subset.size() - 1,
+             *    m[i] == j <=> subset[i] == ref[j].
+             *
+             * The array ref must be sorted in increasing order.
+             * If the array subset is also sorted in increasing order, then the time complexity is O(n) with n = ref.size().
+             * If the array subset is not sorted, the time complexity is O(m*log(m) + n) with m = subset.size() and n = ref.size().
+             *
+             * @tparam T1
+             * @tparam T2
+             * @param xsubset
+             * @param xref
+             * @return
+             */
+            template<typename T1, typename T2>
+            auto locate_values(const xt::xexpression<T1> &xsubset, const xt::xexpression<T2> &xref) {
+                auto &subset = xsubset.derived_cast();
+                auto &ref = xref.derived_cast();
+
+                auto find_map_sorted = [](const auto &subset, const auto &ref) {
+                    auto res = xt::empty_like(subset);
+
+                    index_t i = 0;
+                    index_t j = 0;
+                    index_t size_subset = subset.size();
+                    index_t size_ref = ref.size();
+
+                    while (i < size_subset && j < size_ref) {
+                        if (subset(i) == ref(j)) {
+                            res(i) = j;
+                            ++i;
+                        }
+                        ++j;
+                    }
+
+                    hg_assert(i == size_subset, "Could not match every elements of the subset with elements of "
+                                                "the reference set.");
+
+                    return res;
+                };
+                // if subset is already sorted:
+                if (xt::all(xt::view(subset, xt::range(0, subset.size() - 1))
+                            <= xt::view(subset, xt::range(1, subset.size())))) {
+                    return find_map_sorted(subset, ref);
+                } else {
+                    auto sorted_indices = hg::arg_sort(subset);
+                    auto map = find_map_sorted(xt::index_view(subset, sorted_indices), ref);
+                    auto res = xt::empty_like(subset);
+                    xt::noalias(xt::index_view(res, sorted_indices)) = map;
+                    return res;
+                }
+
+            }
+        }
+
+
+        template<typename T1, typename T2>
+        auto select(const hg::tree &tree,
+                    const xt::xexpression<T1> &xnode_map,
+                    const xt::xexpression<T2> &xmst_weights,
+                    const xt::xexpression<T1> &xselected_graph_vertices) {
+            auto &node_map = xnode_map.derived_cast();
+            auto &selected_graph_vertices = xselected_graph_vertices.derived_cast();
+            auto &mst_weights = xmst_weights.derived_cast();
+            hg_assert_1d_array(node_map);
+            hg_assert_1d_array(mst_weights);
+            hg_assert_1d_array(selected_graph_vertices);
+            hg_assert_integral_value_type(node_map);
+            hg_assert(mst_weights.size() == num_vertices(tree) - num_leaves(tree),
+                      "mst weights do not match with the size of tree.");
+            using value_type = typename T2::value_type;
+            index_t n_leaves = num_leaves(tree);
+
+            //
+            // Identify and rank nodes of the input that are part of the result
+            //
 
             // indices of the nodes in the new tree, -1 if the node is not part of the new tree
             array_1d<index_t> new_node_index = xt::empty<index_t>({num_vertices(tree)});
@@ -33,6 +114,9 @@ namespace hg {
             // at the end of iteration i:
             //  - all nodes <= i have a valid new node index
             //  - all nodes > i that have a child <= i with a new node index != 1 have a temporary node index of 0
+            auto selected_leaves =
+                    distributed_internal::locate_values(selected_graph_vertices,
+                                                        xt::view(node_map, xt::range(0, num_leaves(tree))));
             xt::index_view(new_node_index, selected_leaves) = 0;
             index_t num_nodes_new_tree = 0;
             for (index_t i: leaves_to_root_iterator(tree, leaves_it::include, root_it::exclude)) {
@@ -49,20 +133,30 @@ namespace hg {
                 ++num_nodes_new_tree;
             }
 
-            // construct final parent and node map
+            //
+            // construct the new distributed tree from the identified node
+            //
+
+            index_t num_leaves_new_tree = selected_leaves.size();
             array_1d<index_t> new_parent = xt::empty<index_t>({num_nodes_new_tree});
-            array_1d<index_t> node_map = xt::empty<index_t>({num_nodes_new_tree});
+            array_1d<index_t> new_node_map = xt::empty<index_t>({num_nodes_new_tree});
+            array_1d<value_type> new_mst_weights = xt::empty<value_type>({num_nodes_new_tree - num_leaves_new_tree});
 
             index_t count = 0;
             for (index_t i: leaves_to_root_iterator(tree, leaves_it::include, root_it::include)) {
                 if (new_node_index(i) != -1) {
                     new_parent(count) = new_node_index(parent(i, tree));
-                    node_map(count) = i;
+                    new_node_map(count) = node_map(i);
+                    if (i >= n_leaves) {
+                        new_mst_weights(count - num_leaves_new_tree) = mst_weights(i - n_leaves);
+                    }
                     ++count;
                 }
             }
 
-            return std::make_pair(hg::tree(std::move(new_parent)), std::move(node_map));
+            return std::make_tuple(hg::tree(std::move(new_parent)),
+                                   std::move(new_node_map),
+                                   std::move(new_mst_weights));
         }
 
         template<typename T, typename T2>
@@ -91,12 +185,18 @@ namespace hg {
             hg_assert_node_weights(tree1, node_map1);
             hg_assert_node_weights(tree2, node_map2);
             hg_assert(mst_weights1.size() == num_vertices(tree1) - num_leaves(tree1),
-                      "mst altitudes 1 does not match with the size of tree1.");
+                      "mst weights 1 do not match with the size of tree1.");
             hg_assert(mst_weights2.size() == num_vertices(tree2) - num_leaves(tree2),
-                      "mst altitudes 2 does not match with the size of tree2.");
-            hg_assert_same_shape(border_edge_sources, border_edge_targets);
+                      "mst weights 2 do not match with the size of tree2.");
             hg_assert_same_shape(border_edge_sources, border_edge_targets);
             hg_assert_same_shape(border_edge_sources, border_edge_weights);
+            using value_type = typename T2::value_type;
+            //
+            // Initialize constants and returned buffers
+            //
+            // General note: the leaves of the new distributed tree are equal to the union of the leaves of the two input
+            // trees. The tree1.num_leaves() first leaves of the new tree will correspond to the leaves of the first tree
+            // and tree2.num_leaves() remaining ones, will correspond to the leaves of the second tree.
 
             const index_t size_tree1 = num_vertices(tree1);
             const index_t size_tree2 = num_vertices(tree2);
@@ -105,52 +205,9 @@ namespace hg {
             index_t num_border_edges = border_edge_sources.size();
             index_t num_leaves_join = num_leaves_tree1 + num_leaves_tree2;
 
-            using value_type = typename T2::value_type;
-            using pair = std::pair<value_type, index_t>;
-            pair infinity = pair((std::numeric_limits<value_type>::has_infinity) ?
-                                 std::numeric_limits<value_type>::infinity() :
-                                 std::numeric_limits<value_type>::max(),
-                                 std::numeric_limits<index_t>::max());
+            auto border_edge_sources_tree1 = distributed_internal::locate_values(border_edge_sources, node_map1);
+            auto border_edge_targets_tree2 = distributed_internal::locate_values(border_edge_targets, node_map2);
 
-
-            const auto less = [](const pair &p1, const pair &p2) {
-                return (p1.first < p2.first) ||
-                       ((p1.first == p2.first) && (p1.second < p2.second));
-            };
-
-            const auto attribute_child_one_leaf_node = [](const auto &tree, const index_t shift) {
-                array_2d<index_t> attr({num_vertices(tree), 2}, -1);
-                xt::noalias(xt::view(attr, xt::range(0, (index_t) num_leaves(tree)), 0)) =
-                        xt::arange(shift, shift + (index_t) num_leaves(tree));
-
-                for (auto i: leaves_to_root_iterator(tree, leaves_it::include, root_it::exclude)) {
-                    index_t p = parent(i, tree);
-                    if (attr(p, 0) == -1){
-                        attr(p, 0) = attr(i, 0);
-                    } else{
-                        attr(p, 1) = attr(i, 0);
-                    }
-                }
-
-                return attr;
-            };
-
-            const auto child_one_leaf_tree1 = attribute_child_one_leaf_node(tree1, 0);
-            const auto child_one_leaf_tree2 = attribute_child_one_leaf_node(tree2, num_leaves_tree1);
-
-            array_1d<index_t> sorted_edge_indices = xt::arange<index_t>({(index_t) border_edge_weights.shape(0)});
-            hg::stable_sort(sorted_edge_indices,
-                            [&border_edge_weights, &border_edge_map](const index_t i, const index_t j) {
-                                return (border_edge_weights(i) < border_edge_weights(j)) ||
-                                       ((border_edge_weights(i) == border_edge_weights(j)) &&
-                                        (border_edge_map(i) == border_edge_map(j)));
-                            });
-
-            // disjoint forest
-            union_find uf(num_leaves_join);
-
-            // mapping canonical nodes of the disjoint forest to their respective tree root
-            array_1d<index_t> roots = xt::arange<index_t>(num_leaves_join);
 
             // new parent mapping : size is the worst case
             array_1d<index_t> new_parents = xt::empty<index_t>({size_tree1 + size_tree2 + num_border_edges});
@@ -167,6 +224,70 @@ namespace hg {
                                                                           size_tree2 - num_leaves_tree2 +
                                                                           num_border_edges});
 
+
+            // Computes a tree attribute a of shape [tree.num_vertices(), 2], such that for any node i:
+            // a[i, 0] is equal to the index of a leaf vertex contained in the first child of i (arbitrarily chosen)
+            // a[i, 1] is equal to the index of a leaf vertex contained in the second child of i (arbitrarily chosen),
+            //         if i has two children or -1 otherwise
+            // the indices are shifted by the given shift value.
+            const auto attribute_child_one_leaf_node = [](const auto &tree, const index_t shift) {
+                array_2d<index_t> attr({num_vertices(tree), 2}, -1);
+                xt::noalias(xt::view(attr, xt::range(0, (index_t) num_leaves(tree)), 0)) =
+                        xt::arange(shift, shift + (index_t) num_leaves(tree));
+
+                for (auto i: leaves_to_root_iterator(tree, leaves_it::include, root_it::exclude)) {
+                    index_t p = parent(i, tree);
+                    if (attr(p, 0) == -1) {
+                        attr(p, 0) = attr(i, 0);
+                    } else {
+                        attr(p, 1) = attr(i, 0);
+                    }
+                }
+
+                return attr;
+            };
+
+            const auto child_one_leaf_tree1 = attribute_child_one_leaf_node(tree1, 0);
+            const auto child_one_leaf_tree2 = attribute_child_one_leaf_node(tree2, num_leaves_tree1);
+
+            //
+            // sort border edges
+            //
+
+            // marginal total order of the edges (edge_weight, edge_index)
+
+            using pair = std::pair<value_type, index_t>;
+            pair infinity = pair((std::numeric_limits<value_type>::has_infinity) ?
+                                 std::numeric_limits<value_type>::infinity() :
+                                 std::numeric_limits<value_type>::max(),
+                                 std::numeric_limits<index_t>::max());
+
+
+            const auto less = [](const pair &p1, const pair &p2) {
+                return (p1.first < p2.first) ||
+                       ((p1.first == p2.first) && (p1.second < p2.second));
+            };
+
+            array_1d<index_t> sorted_edge_indices = xt::arange<index_t>({(index_t) border_edge_weights.shape(0)});
+            hg::stable_sort(sorted_edge_indices,
+                            [&border_edge_weights, &border_edge_map](const index_t i, const index_t j) {
+                                return (border_edge_weights(i) < border_edge_weights(j)) ||
+                                       ((border_edge_weights(i) == border_edge_weights(j)) &&
+                                        (border_edge_map(i) == border_edge_map(j)));
+                            });
+
+            //
+            // Modified Kruskal's algorithm using three edge sets:
+            //   - the edges of the first tree (internal node)
+            //   - the edges of the second tree (internal node)
+            //   - the edges of the border
+
+            // disjoint forest
+            union_find uf(num_leaves_join);
+
+            // mapping canonical nodes of the disjoint forest to their respective tree root
+            array_1d<index_t> roots = xt::arange<index_t>(num_leaves_join);
+
             // current number of nodes in the new tree
             index_t num_nodes = num_leaves_join;
 
@@ -182,7 +303,6 @@ namespace hg {
                 index_t canonical2 = -1;
                 pair edge;
 
-
                 pair iw_tree1 = (index_tree1 < size_tree1) ?
                                 pair(mst_weights1(index_tree1 - num_leaves_tree1), node_map1(index_tree1)) :
                                 infinity;
@@ -196,8 +316,8 @@ namespace hg {
                 // smallest element is a border edge : normal Kruskal step
                 if (less(iw_edge, iw_tree1) && less(iw_edge, iw_tree2)) {
 
-                    auto source = border_edge_sources(ei);
-                    auto target = border_edge_targets(ei);
+                    auto source = border_edge_sources_tree1(ei);
+                    auto target = border_edge_targets_tree2(ei);
                     canonical1 = uf.find(source);
                     canonical2 = uf.find(target + num_leaves_tree1);
                     edge = iw_edge;
@@ -243,13 +363,15 @@ namespace hg {
 
             new_parents(num_nodes - 1) = num_nodes - 1;
 
+            // reduce mappings to their real sizes
             array_1d<index_t> rnew_node_map = xt::view(new_node_map, xt::range(0, num_nodes));
-            array_1d<value_type > rnew_mst_weights = xt::view(new_mst_weights,
-                                                              xt::range(0, num_nodes - (num_leaves_tree1 + num_leaves_tree2)));
+            array_1d<value_type> rnew_mst_weights = xt::view(new_mst_weights,
+                                                             xt::range(0, num_nodes -
+                                                                          (num_leaves_tree1 + num_leaves_tree2)));
             return std::make_tuple(
                     hg::tree(xt::view(new_parents, xt::range(0, num_nodes))),
-                    rnew_node_map,
-                    rnew_mst_weights);
+                    std::move(rnew_node_map),
+                    std::move(rnew_mst_weights));
         }
 
         template<typename T, typename T2>
@@ -337,7 +459,7 @@ namespace hg {
                     pair iw_tree2 = (index_tree2 < size_tree2) ?
                                     pair(mst_weights2(index_tree2 - num_leaves_tree2), node_map2(index_tree2)) :
                                     infinity;
-                    if (less(iw_tree2, iw_tree1)) { // check condition
+                    if (less(iw_tree2, iw_tree1)) {
                         if (new_rank_tree2(index_tree2) == -1) {
                             new_rank_tree2(parent(index_tree2, tree2)) = -1;
                             new_rank_tree2(index_tree2) = current_rank;
@@ -402,17 +524,22 @@ namespace hg {
 using namespace hg;
 
 
-void py_init_distributed(pybind11::module &m){
+void py_init_distributed(pybind11::module &m) {
     //xt::import_numpy();
 
-    m.def("_select", [](const hg::tree &tree, const xt::pyarray<hg::index_t> &selected_leaves) {
-              hg_assert(xt::amin(selected_leaves)() >= 0 && xt::amax(selected_leaves)() < (index_t) num_leaves(tree),
-                        "Invalid leaf index.");
-              auto res = hg::distributed::select(tree, selected_leaves);
-              return py::make_tuple(std::move(res.first), std::move(res.second));
+    m.def("_select", [](const hg::tree &tree,
+                        const xt::pyarray<hg::index_t> &node_map,
+                        const xt::pyarray<double> &mst_weights,
+                        const xt::pyarray<hg::index_t> &selected_vertices) {
+              auto res = hg::distributed::select(tree, node_map, mst_weights, selected_vertices);
+              return py::make_tuple(std::move(std::get<0>(res)),
+                                    std::move(std::get<1>(res)),
+                                    std::move(std::get<2>(res)));
           }, "Select a subtree induced by a subset of leaves of the input tree.",
           py::arg("tree"),
-          py::arg("selected_leaves"));
+          py::arg("node_map"),
+          py::arg("mst_weights"),
+          py::arg("selected_vertices"));
 
     m.def("_join",
           [](const hg::tree &tree1, const xt::pyarray<hg::index_t> &node_map1, const xt::pyarray<double> &mst_weights1,
