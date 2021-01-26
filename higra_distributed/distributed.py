@@ -92,6 +92,7 @@ def insert(tree1, tree2):
     tree.mst_weights = mst_weights
     return tree
 
+
 class AbstractCausalGraph:
 
     def get_vertex_map(self, slice_number):
@@ -184,7 +185,7 @@ class AbstractCausalGraph:
         raise NotImplementedError()
 
 
-class CausalGraph_2d_4adj (AbstractCausalGraph):
+class CausalGraph_2d_4adj(AbstractCausalGraph):
 
     def __init__(self, image, max_slice_size, weight_function=lambda x, y: np.abs(x - y)):
         self.image = image
