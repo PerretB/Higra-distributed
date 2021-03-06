@@ -1,3 +1,13 @@
+/***************************************************************************
+* Copyright ESIEE Paris (2021)                                             *
+*                                                                          *
+* Contributor(s) : Benjamin Perret                                         *
+*                                                                          *
+* Distributed under the terms of the CECILL-B License.                     *
+*                                                                          *
+* The full license is in the file LICENSE, distributed with this software. *
+****************************************************************************/
+
 #define FORCE_IMPORT_ARRAY
 #include "pybind11/pybind11.h"
 
@@ -11,7 +21,7 @@ namespace py = pybind11;
 // Python Module and Docstrings
 PYBIND11_MODULE(higra_distributedm, m) {
     m.doc() = R"pbdoc(
-        An example higra extension
+        Higra extension for distributed binary partition tree
     )pbdoc";
     xt::import_numpy();
     py_init_distributed(m);
